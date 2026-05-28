@@ -121,18 +121,16 @@ def _topbar(s):
 
 def _nav():
     cur  = st.session_state.get("view", "approach")
-    cols = st.columns([1.2, 1, 1, 1, 1, 1, 1.2, 1.5])
+    cols = st.columns([1.2, 1.2, 1.4, 1.4, 1.4, 1.8])
     items = [
-        (cols[0], "approach",   "Approach",                None,    None),
-        (cols[1], "overview",   "Overview",                None,    None),
-        (cols[2], "cluster_1",  "Patient ID",              1,       TEAL),
-        (cols[3], "cluster_2",  "Access Pending",          2,       NAVY),
-        (cols[4], "cluster_3",  "Evidence Gap",            3,       CRIMSON),
-        (cols[5], "cluster_4",  "Narrative Build",         4,       AMBER),
-        (cols[6], "integrated", "Integrated Insights",     None,    None),
-        (cols[7], "envelope",   "Custom Rep Support Card", None,    None),
+        (cols[0], "approach",    "Approach"),
+        (cols[1], "overview",    "Overview"),
+        (cols[2], "integrated",  "Integrated Insights"),
+        (cols[3], "crosstabs",   "Cross-Tab Repository"),
+        (cols[4], "qualitative", "Qualitative Analysis"),
+        (cols[5], "envelope",    "Custom Rep Support Card"),
     ]
-    for col, vid, label, cid, dot in items:
+    for col, vid, label in items:
         with col:
             active = (cur == vid)
             if st.button(label, key=f"nav_{vid}", use_container_width=True,
@@ -300,7 +298,7 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     cur      = st.session_state["view"]
-    NO_FILTER = ("approach", "envelope", "crosstabs", "qualitative", "integrated")
+    NO_FILTER = ("approach", "overview", "envelope", "crosstabs", "qualitative", "integrated")
     hcps     = (_filter_bar(eng.hcps_df)
                 if cur not in NO_FILTER and not cur.startswith("cluster_")
                 else eng.hcps_df)
@@ -310,8 +308,6 @@ def main():
         _load_module("approach").render(eng)
     elif cur == "overview":
         _load_module("overview").render(eng, hcps)
-    elif cur.startswith("cluster_"):
-        _load_module("cluster_detail").render(int(cur.split("_")[1]), hcps, eng)
     elif cur == "integrated":
         _load_module("integrated").render(eng, eng.hcps_df)
     elif cur == "crosstabs":
