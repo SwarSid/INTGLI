@@ -5,11 +5,15 @@ import sys, os, importlib.util, time
 
 # ── Robust path setup ─────────────────────────────────────────────────────────
 _HERE = os.path.dirname(os.path.abspath(__file__))
-# Streamlit Cloud: repo cloned to /mount/src/<reponame>/
-# views/ folder is a sibling of app.py — always find it relative to app.py
-_VIEWS_DIR = os.path.join(_HERE, "views")
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
+
+# views/ may be a subfolder OR files may be flat at root (depends on how GitHub was uploaded)
+_VIEWS_DIR = (
+    os.path.join(_HERE, "views")
+    if os.path.isdir(os.path.join(_HERE, "views"))
+    else _HERE   # flat upload — view files are at same level as app.py
+)
 
 st.set_page_config(page_title="HCP Conversion Atlas · ICI", page_icon="🏥",
                    layout="wide", initial_sidebar_state="collapsed")
@@ -45,10 +49,16 @@ div[data-testid="stSidebarCollapsedControl"]{{display:none}}
 
 # ── Module loaders ────────────────────────────────────────────────────────────
 def _load_module(name):
-    """Load a Python file by absolute path — immune to sys.path issues."""
-    path = os.path.join(_VIEWS_DIR, f"{name}.py")
-    if not os.path.exists(path):
-        st.error(f"Missing file: {path}\n\nMake sure the views/ folder was uploaded to GitHub.")
+    """Load view file — works whether files are in views/ subfolder or flat at root."""
+    candidates = [
+        os.path.join(_VIEWS_DIR, f"{name}.py"),
+        os.path.join(_HERE, f"{name}.py"),
+    ]
+    path = next((p for p in candidates if os.path.exists(p)), None)
+    if path is None:
+        root_files = os.listdir(_HERE)
+        root_files = ", ".join(sorted(os.listdir(_HERE)))
+        st.error(f"Cannot find {name}.py. Searched: {candidates}. Files at root: {root_files}")
         st.stop()
     spec = importlib.util.spec_from_file_location(name, path)
     mod  = importlib.util.module_from_spec(spec)
@@ -56,11 +66,17 @@ def _load_module(name):
     return mod
 
 def _load_engine_class():
-    path = os.path.join(_HERE, "data_engine.py")
-    spec = importlib.util.spec_from_file_location("data_engine", path)
-    mod  = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.DataEngine
+    # Try both locations — subfolder or flat root
+    for candidate in [
+        os.path.join(_HERE, "data_engine.py"),
+        os.path.join(os.path.dirname(_HERE), "data_engine.py"),
+    ]:
+        if os.path.exists(candidate):
+            spec = importlib.util.spec_from_file_location("data_engine", candidate)
+            mod  = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod.DataEngine
+    raise FileNotFoundError(f"data_engine.py not found near {_HERE}")
 
 
 # ── Engine stored in session_state ───────────────────────────────────────────
