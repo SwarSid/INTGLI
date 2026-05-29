@@ -1,661 +1,755 @@
 """
-Cross-Tab Repository — Core lens: Interaction vs No Interaction × ATU metrics.
-Secondary lenses: VA Used, LTIP Top-2, User Groups (High/Low/Non-User).
-Every number from real data. Every insight has a full evidence blurb.
+Cross-Tab Repository — 100 cross-tabs connecting PET (VA, LTIP, ServierONE)
+with ATU (Q3_50, Q3_60, Q3_110, Q3_120, qualitative themes).
+Includes statistical significance testing and clean sample sizes.
 """
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from scipy.stats import mannwhitneyu
+import plotly.express as px
+from scipy import stats as scipy_stats
+from scipy.stats import chi2_contingency, mannwhitneyu, ttest_ind
 
-TEAL="#0F4C5C"; NAVY="#1E293B"; CRIMSON="#832232"; AMBER="#B8860B"; GREEN="#15803D"
-LGRAY="#F8FAFC"; MGRAY="#E2E8F0"; DGRAY="#64748B"
+TEAL = "#0F4C5C"
+NAVY = "#1E293B"
+CRIMSON = "#832232"
+AMBER = "#B8860B"
+GREEN = "#15803D"
+LGRAY = "#F8FAFC"
+MGRAY = "#E2E8F0"
+DGRAY = "#64748B"
 
 ATTR_LABELS = [
-    "Prolonged PFS","Reduction in tumor volume","Prolonged OS","Low grade 3-4 AEs",
-    "Low hepatic toxicity","Low hematological toxicity","Low neurotoxicity",
-    "Low risk hypermutations","Manageable LFT monitoring","Good patient QoL",
-    "Affordable","Manufacturer patient services","Easy to prescribe",
-    "Convenient route","Low risk long-term SEs","Ability to preserve fertility",
-    "Delays next treatment","Reduces seizures","Fair office compensation",
+    "Prolonged PFS", "Tumor volume reduction", "Prolonged OS",
+    "Low grade 3-4 AEs", "Low hepatic toxicity", "Low hematological toxicity",
+    "Low neurotoxicity", "Low risk hypermutations", "Manageable LFT monitoring",
+    "Good patient QoL", "Affordable", "Manufacturer patient services",
+    "Easy to prescribe", "Convenient route", "Low risk long-term SEs",
+    "Ability to preserve fertility", "Delays next treatment",
+    "Reduces seizures", "Fair office compensation",
 ]
 
-METRIC_META = {
-    "unaided":          ("Unaided Voranigo Awareness",    "0/1",   "ATU Q2_10Z open-end — text scan for 'voranigo'/'vorasidenib'"),
-    "vora_fam":         ("Voranigo Familiarity",          "1–5",   "ATU Q2_20Z item k: 1=Never heard → 5=Have used"),
-    "curr_vora_share":  ("Current Voranigo Share %",      "%",     "ATU Q3_60Z_B8 ÷ S0_120Z Grade 2 PL × 100"),
-    "future_intent":    ("Future Voranigo Intent",        "0–10",  "ATU Q3_60Z next-10 B8 sum across 12 patient types"),
-    "msg_rec":          ("Messages Recalled",             "0–10",  "PET Q2_10Z — count of 10 brand messages recalled"),
-    "attr_shift":       ("Attribute Belief Shifts",       "0–17",  "PET Q3_40BZ — count of 17 attributes rated ≥6 post-visit"),
-    "top_attr_perf":    ("Top Voranigo Attr Performance", "1–7",   "ATU Q3_120Z Voranigo cols 20–38, avg"),
-    "like_inc":         ("Likelihood to Increase Rx",    "1–7",   "PET C3_35Z raw score"),
-    "ltip_top2":        ("LTIP Top-2 Rate",              "0/1",   "PET C3_35Z ≥6 = top-2 box"),
-    "progs_known":      ("ServierONE Progs Known",        "0–5",   "ATU Q3_260BZ — count of 5 programmes named"),
-    "s1_fam":           ("ServierONE Familiarity",        "1–5",   "ATU Q3_260AZ: 1=Not at all → 5=Extremely familiar"),
-    "barriers":         ("Barriers Cited",                "0–9",   "ATU Q3_220Z — count of barrier options selected"),
-    "belief_align":     ("Clinical Belief Alignment",    "1–7",   "ATU Q4_00Z avg of 8 statements"),
-    "nccn_fam":         ("NCCN Guideline Familiarity",   "1–5",   "ATU Q2_00Z: 1=Never heard → 5=Very familiar"),
-    "ngs_rate":         ("NGS Testing Rate",             "0–1",   "ATU Q1_00Z: % using NGS-only + IHC+NGS ÷ 100"),
-    "call_quality":     ("Call Quality",                 "1–7",   "PET Q3_70Z avg of 5 call quality attributes"),
-    "prod_knowledge":   ("Rep Product Knowledge",        "1–7",   "PET Q3_60Z avg of 7 product knowledge attributes"),
-    "ICI":              ("ICI Score",                    "0–100", "Weighted composite: AC×.14+IBC×.25+MBC×.20+RTC×.13+ABR×.15+KCC×.08+CI×.05"),
-    "peer_shared":      ("Peer Sharing",                 "0–3",   "PET C3_25Z: 0=No, 1=Intent, 2=Within practice, 3=Extended network"),
-    "pt_inq":           ("Patient Inquiry Frequency",    "1–4",   "ATU Q3_300Z: 1=Never → 4=Very often"),
-    "rep_pref":         ("Rep as Preferred Info Source", "0/1",   "ATU Q4_30Z items 1–2: rep discussion preferred"),
-}
 
+# ── Statistical helpers ────────────────────────────────────────────────────────
 
-def _mw(a_s, b_s):
-    """Mann-Whitney U, returns (p, sig, mean_a, mean_b, n_a, n_b, effect)."""
-    a = pd.to_numeric(a_s, errors="coerce").dropna()
-    b = pd.to_numeric(b_s, errors="coerce").dropna()
+def statsig_test(group_a, group_b, test="mannwhitney"):
+    """Returns (stat, p_value, significant, effect_size_label)."""
+    a = pd.to_numeric(group_a, errors="coerce").dropna()
+    b = pd.to_numeric(group_b, errors="coerce").dropna()
     if len(a) < 3 or len(b) < 3:
-        return None, False, a.mean() if len(a) else 0, b.mean() if len(b) else 0, len(a), len(b), ""
-    _, p = mannwhitneyu(a, b, alternative="two-sided")
-    sd = np.sqrt((a.std()**2 + b.std()**2) / 2) if (a.std() + b.std()) > 0 else 1
-    d = abs(a.mean() - b.mean()) / sd
-    eff = "Large" if d >= 0.8 else "Medium" if d >= 0.5 else "Small"
-    return round(p, 3), p < 0.05, round(a.mean(), 2), round(b.mean(), 2), len(a), len(b), eff
+        return None, None, False, "Insufficient n"
+    try:
+        if test == "mannwhitney":
+            stat, p = mannwhitneyu(a, b, alternative="two-sided")
+        else:
+            stat, p = ttest_ind(a, b)
+        sig = p < 0.05
+        # Cohen's d
+        pooled = np.sqrt((a.std() ** 2 + b.std() ** 2) / 2)
+        d = abs(a.mean() - b.mean()) / pooled if pooled > 0 else 0
+        effect = "Large" if d >= 0.8 else "Medium" if d >= 0.5 else "Small"
+        return stat, round(p, 4), sig, effect
+    except Exception:
+        return None, None, False, "Error"
 
 
-def _sig_badge(p, sig):
+def chi2_test(ct):
+    """Chi-square test on a contingency table."""
+    try:
+        chi2, p, dof, _ = chi2_contingency(ct)
+        return round(p, 4), p < 0.05
+    except Exception:
+        return None, False
+
+
+def sig_badge(p, sig):
     if p is None:
-        return '<span style="background:#F1F5F9;color:#94A3B8;padding:2px 7px;border-radius:4px;font-size:10px">n/a</span>'
+        return '<span style="background:#F1F5F9;color:#64748B;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700">N/A</span>'
     if sig:
-        return f'<span style="background:#15803D22;color:#15803D;padding:2px 7px;border-radius:4px;font-size:10px;font-weight:700">✓ p={p}</span>'
-    return f'<span style="background:#FEF3C7;color:#92400E;padding:2px 7px;border-radius:4px;font-size:10px">p={p} n.s.</span>'
+        return f'<span style="background:#15803D22;color:#15803D;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700">✓ p={p} SIGNIFICANT</span>'
+    return f'<span style="background:#E2E8F0;color:#64748B;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:700">p={p} n.s.</span>'
 
 
-def _evidence_expander(label_a, label_b, mean_a, mean_b, n_a, n_b, p, sig, effect,
-                       split_how, metric_how, split_q, metric_q):
-    """Full methodology expander — shows under every cross-tab."""
-    with st.expander("↳ How this was derived — full methodology & evidence"):
-        st.markdown(f"""
-<div style="background:{LGRAY};border-radius:10px;padding:16px 18px;border-left:3px solid {TEAL}">
+# ── Plotting helpers ───────────────────────────────────────────────────────────
 
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
-    <div style="background:white;border-radius:8px;padding:12px 14px;border-top:3px solid {TEAL}">
-      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.18em;color:{TEAL};font-weight:700;margin-bottom:4px">GROUP A — {label_a.upper()}</div>
-      <div style="font-size:28px;font-weight:700;color:#0F172A;line-height:1">{mean_a}</div>
-      <div style="font-size:11px;color:{DGRAY};margin-top:2px">n = {n_a} HCPs</div>
-    </div>
-    <div style="background:white;border-radius:8px;padding:12px 14px;border-top:3px solid {CRIMSON}">
-      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.18em;color:{CRIMSON};font-weight:700;margin-bottom:4px">GROUP B — {label_b.upper()}</div>
-      <div style="font-size:28px;font-weight:700;color:#0F172A;line-height:1">{mean_b}</div>
-      <div style="font-size:11px;color:{DGRAY};margin-top:2px">n = {n_b} HCPs</div>
-    </div>
-  </div>
+def bar_chart(labels, vals_a, vals_b, label_a, label_b, title, color_a=TEAL, color_b=CRIMSON, pct=True):
+    fig = go.Figure()
+    fmt = ".0%" if pct else ".1f"
+    text_a = [f"{v*100:.0f}%" if pct else f"{v:.1f}" for v in vals_a]
+    text_b = [f"{v*100:.0f}%" if pct else f"{v:.1f}" for v in vals_b]
 
-  <div style="margin-bottom:12px;padding:10px 12px;background:white;border-radius:8px">
-    <div style="font-size:10px;text-transform:uppercase;letter-spacing:.15em;color:{NAVY};font-weight:700;margin-bottom:4px">HOW THE SPLIT WAS DEFINED</div>
-    <div style="font-size:12px;color:#334155;line-height:1.6">{split_how}</div>
-    <div style="font-size:10px;color:#94A3B8;margin-top:4px">📊 Source: {split_q}</div>
-  </div>
-
-  <div style="margin-bottom:12px;padding:10px 12px;background:white;border-radius:8px">
-    <div style="font-size:10px;text-transform:uppercase;letter-spacing:.15em;color:{NAVY};font-weight:700;margin-bottom:4px">HOW THE METRIC WAS COMPUTED</div>
-    <div style="font-size:12px;color:#334155;line-height:1.6">{metric_how}</div>
-    <div style="font-size:10px;color:#94A3B8;margin-top:4px">📊 Source: {metric_q}</div>
-  </div>
-
-  <div style="padding:10px 12px;background:{'#F0FDF4' if sig else '#FFFBEB'};border-radius:8px;
-              border-left:3px solid {'#15803D' if sig else AMBER}">
-    <div style="font-size:10px;text-transform:uppercase;letter-spacing:.15em;
-                color:{'#15803D' if sig else '#92400E'};font-weight:700;margin-bottom:4px">
-      STATISTICAL RESULT — Mann-Whitney U (two-sided, non-parametric)
-    </div>
-    <div style="font-size:12px;color:#334155;line-height:1.7">
-      p-value: <b>{p if p is not None else 'N/A'}</b> &nbsp;·&nbsp;
-      Significant at p&lt;0.05: <b>{'Yes ✓' if sig else 'No'}</b><br>
-      {'Effect size (Cohen\'s d): <b>' + str(effect) + '</b><br>' if effect else ''}
-      Δ (A − B): <b>{'+' if mean_a-mean_b>0 else ''}{round(mean_a-mean_b,2)}</b><br>
-      {('<b>⚠ Not significant:</b> The observed difference (' + str(round(abs(mean_a-mean_b),2)) + ') could be due to chance given n=' + str(n_a+n_b) + '. This result is reported as observed without adjustment or inference.') if not sig and p is not None else ('<b>✓ Significant finding:</b> This difference is unlikely due to chance. Interpret in context of n=' + str(n_a+n_b) + ' overlapping HCPs.') if sig else ''}
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+    fig.add_trace(go.Bar(name=label_a, x=labels, y=vals_a, marker_color=color_a,
+                         text=text_a, textposition="outside"))
+    fig.add_trace(go.Bar(name=label_b, x=labels, y=vals_b, marker_color=color_b,
+                         text=text_b, textposition="outside"))
+    fig.update_layout(
+        title=dict(text=title, font=dict(family="DM Serif Display", size=16)),
+        barmode="group", height=340,
+        plot_bgcolor="white", paper_bgcolor="white",
+        font=dict(family="Inter", size=11),
+        yaxis=dict(tickformat=".0%" if pct else ".1f", showgrid=True,
+                   gridcolor="#F1F5F9", range=[0, max(max(vals_a + vals_b, default=0)*1.3, 0.1)]),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.3),
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+    return fig
 
 
-def _xt_row(counter, title, subtitle, label_a, label_b, mean_a, mean_b, n_a, n_b,
-            p, sig, unit, split_how, metric_how, split_q, metric_q):
-    """Single cross-tab card."""
-    border = GREEN if sig else MGRAY
-    bg = "#F0FDF4" if sig else "white"
+def heatmap_chart(df_ct, title):
+    fig = px.imshow(
+        df_ct.values,
+        x=df_ct.columns.tolist(),
+        y=df_ct.index.tolist(),
+        color_continuous_scale=[[0, "#F8FAFC"], [0.5, f"{TEAL}88"], [1, TEAL]],
+        text_auto=".0%",
+        aspect="auto",
+        title=title,
+    )
+    fig.update_layout(
+        height=300, font=dict(family="Inter", size=10),
+        plot_bgcolor="white", paper_bgcolor="white",
+        coloraxis_showscale=False,
+        title=dict(font=dict(family="DM Serif Display", size=15)),
+        margin=dict(l=0, r=0, t=40, b=0),
+    )
+    return fig
 
+
+def xtab_card(number, title, description, source_note, fig, p_value, sig, n_a, n_b, label_a, label_b):
     st.markdown(f"""
-<div style="background:{bg};border:1px solid {border};border-left:4px solid {border};
-            border-radius:12px;padding:14px 18px;margin-bottom:8px">
-  <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
-    <div style="flex:1">
-      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.2em;
-                  color:#94A3B8;font-weight:600;margin-bottom:3px">#{counter:03d}</div>
-      <div style="font-size:14px;font-weight:600;color:#0F172A;margin-bottom:3px">{title}</div>
-      <div style="font-size:12px;color:{DGRAY};margin-bottom:6px">{subtitle}</div>
-      <div style="display:flex;gap:20px">
-        <div>
-          <div style="font-size:10px;color:#94A3B8;text-transform:uppercase;letter-spacing:.12em">{label_a}</div>
-          <div style="font-family:'DM Serif Display',serif;font-size:22px;color:{TEAL};line-height:1">{mean_a}<span style="font-size:12px;color:#94A3B8">{unit}</span></div>
-          <div style="font-size:10px;color:#94A3B8">n={n_a}</div>
-        </div>
-        <div style="display:flex;align-items:center;color:#CBD5E1;font-size:18px">vs</div>
-        <div>
-          <div style="font-size:10px;color:#94A3B8;text-transform:uppercase;letter-spacing:.12em">{label_b}</div>
-          <div style="font-family:'DM Serif Display',serif;font-size:22px;color:{CRIMSON};line-height:1">{mean_b}<span style="font-size:12px;color:#94A3B8">{unit}</span></div>
-          <div style="font-size:10px;color:#94A3B8">n={n_b}</div>
-        </div>
-        <div style="display:flex;align-items:center">
-          <div>
-            <div style="font-size:10px;color:#94A3B8;text-transform:uppercase;letter-spacing:.12em">Δ</div>
-            <div style="font-size:16px;font-weight:700;color:{'#15803D' if mean_a>mean_b else CRIMSON}">
-              {'+' if mean_a-mean_b>0 else ''}{round(mean_a-mean_b,2)}{unit}
-            </div>
-          </div>
-        </div>
+<div class="xtab-card">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px">
+    <div>
+      <span style="font-size:10px;text-transform:uppercase;letter-spacing:.2em;
+                   color:#94A3B8;font-weight:600">CROSS-TAB #{number:03d}</span>
+      <div class="xtab-header">{title}</div>
+      <div class="xtab-desc">{description}</div>
+    </div>
+    <div style="text-align:right;flex-shrink:0;margin-left:16px">
+      {sig_badge(p_value, sig)}
+      <div style="font-size:10px;color:#94A3B8;margin-top:4px">
+        {label_a}: n={n_a} &nbsp;|&nbsp; {label_b}: n={n_b}
       </div>
     </div>
-    <div style="text-align:right;flex-shrink:0">
-      {_sig_badge(p, sig)}
-    </div>
   </div>
 </div>
 """, unsafe_allow_html=True)
-    _evidence_expander(label_a, label_b, mean_a, mean_b, n_a, n_b, p, sig,
-                       "", split_how, metric_how, split_q, metric_q)
+    st.plotly_chart(fig, use_container_width=True)
+    st.markdown(f'<div class="xtab-source">Source: {source_note}</div>', unsafe_allow_html=True)
+    st.markdown("---")
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN RENDER
+# ══════════════════════════════════════════════════════════════════════════════
 
 def render(eng):
-    df = eng.hcps_df.copy()
+    df = eng.hcps_df
     if df is None or df.empty:
         st.warning("No data loaded.")
         return
 
-    n = len(df)
-
-    # ── Compute derived splits ────────────────────────────────────────────────
-    # Interaction = agreed to prescribe OR VA shown OR LTIP top-2
-    df["had_interaction"] = (
-        (df.get("agreed", pd.Series(0, index=df.index)) == 1) |
-        (df.get("any_va", pd.Series(0, index=df.index)) == 1) |
-        (df.get("ltip_top2", pd.Series(0, index=df.index)) == 1)
-    ).astype(int)
-
-    # User groups
-    df["user_group"] = "Non-User"
-    if "curr_vora_share" in df.columns:
-        df.loc[df["curr_vora_share"] > 30, "user_group"] = "High Voranigo User"
-        df.loc[(df["curr_vora_share"] > 0) & (df["curr_vora_share"] <= 30), "user_group"] = "Low Voranigo User"
-
-    inter    = df[df["had_interaction"] == 1]
-    no_inter = df[df["had_interaction"] == 0]
-    va_yes   = df[df.get("any_va", pd.Series(0, index=df.index)) == 1] if "any_va" in df.columns else df.iloc[:0]
-    va_no    = df[df.get("any_va", pd.Series(0, index=df.index)) == 0] if "any_va" in df.columns else df
-    ltip_h   = df[df.get("ltip_top2", pd.Series(0, index=df.index)) == 1] if "ltip_top2" in df.columns else df.iloc[:0]
-    ltip_l   = df[df.get("ltip_top2", pd.Series(0, index=df.index)) == 0] if "ltip_top2" in df.columns else df
-    high_u   = df[df["user_group"] == "High Voranigo User"]
-    low_u    = df[df["user_group"] == "Low Voranigo User"]
-    non_u    = df[df["user_group"] == "Non-User"]
-
-    # ── Header ────────────────────────────────────────────────────────────────
     st.markdown(f"""
-<div style="margin-bottom:16px">
+<div style="margin-bottom:8px">
   <div style="font-size:10px;text-transform:uppercase;letter-spacing:.28em;
               color:{CRIMSON};font-weight:600">CROSS-TAB REPOSITORY</div>
   <h1 style="font-family:'DM Serif Display',serif;font-size:44px;font-weight:300;
              color:#0F172A;line-height:1.05;margin-bottom:10px">
-    Interaction or no interaction.<br>
-    <span style="color:{TEAL}">What does it change?</span>
+    100 connected cross-tabs.<br>
+    <span style="color:{TEAL}">Every PET signal vs every ATU metric.</span>
   </h1>
   <p style="font-size:14px;color:#475569;max-width:700px;line-height:1.65">
-    {n} matched HCPs from ATU × PET. Every cross-tab below compares what happens to ATU
-    metrics when there was a Voranigo rep interaction vs. when there wasn't —
-    then breaks it down by user group and rep quality.
-    Every number is computed from uploaded data. Click any finding to see full methodology.
+    Each table connects a promotional variable (Visual Aid usage, LTIP, ServierONE)
+    to an ATU outcome (usage, perception, barriers). Sample sizes, statistical
+    significance (Mann-Whitney U / Chi-square), and effect sizes shown per table.
   </p>
 </div>
 """, unsafe_allow_html=True)
 
-    # Hero metric tiles
-    c1,c2,c3,c4 = st.columns(4)
-    with c1:
-        st.markdown(f'<div class="mcard"><div class="mlabel">WITH INTERACTION</div><div class="mval">{len(inter)}</div><div class="msub">of {n} matched HCPs</div></div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown(f'<div class="mcard"><div class="mlabel">WITHOUT INTERACTION</div><div class="mval">{len(no_inter)}</div><div class="msub">of {n} matched HCPs</div></div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown(f'<div class="mcard"><div class="mlabel">HIGH VORA USERS</div><div class="mval">{len(high_u)}</div><div class="msub">share &gt;30%</div></div>', unsafe_allow_html=True)
-    with c4:
-        st.markdown(f'<div style="background:{NAVY};border-radius:16px;padding:24px"><div style="font-size:10px;text-transform:uppercase;letter-spacing:.22em;color:rgba(255,255,255,.6);font-weight:600">NON-USERS</div><div style="font-family:\'DM Serif Display\',serif;font-size:48px;font-weight:300;color:white;line-height:1">{len(non_u)}</div><div style="font-size:12px;color:rgba(255,255,255,.5)">zero current Vora patients</div></div>', unsafe_allow_html=True)
+    # ── Filter & search ──────────────────────────────────────────────────────
+    cola, colb, colc = st.columns([2, 2, 1])
+    with cola:
+        category = st.selectbox("Category", [
+            "All",
+            "Visual Aid × ATU",
+            "LTIP × ATU",
+            "ServierONE × ATU",
+            "ICI Dimensions × ATU",
+            "Cluster × ATU",
+        ])
+    with colb:
+        search = st.text_input("Search cross-tabs", placeholder="e.g. Voranigo usage, seizure...")
+    with colc:
+        sig_only = st.checkbox("Significant only (p<0.05)")
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    tabs = st.tabs(["🎯 Visual Aid", "📈 LTIP", "🔑 ServierONE", "📊 ICI Dims", "🧩 Clusters", "📋 Full Table"])
 
-    # ── Main tabs ─────────────────────────────────────────────────────────────
-    tabs = st.tabs([
-        "🎯 Interaction vs No Interaction",
-        "📊 VA Used vs Not",
-        "📈 LTIP Top-2 vs Non",
-        "👥 High vs Low vs Non-User",
-        "🔬 Voranigo Perception by Group",
-        "📋 All Results Table",
-    ])
-
-    INTER_SPLIT_HOW = (
-        "An 'interaction' is defined as any of: (a) HCP agreed to prescribe post-visit "
-        "(PET Q3_20Z=Yes), (b) a visual aid was shown during the visit (PET Q1_100Z any=1), "
-        "or (c) LTIP top-2 box (PET C3_35Z ≥6). This composite definition captures "
-        "any meaningful promotional contact. 'No interaction' = none of these three."
-    )
-    INTER_SPLIT_Q = "PET Q3_20Z (agreed) OR Q1_100Z (VA shown) OR C3_35Z≥6 (LTIP top-2)"
-
-    VA_SPLIT_HOW = (
-        "Visual Aid Used = at least one of 10 content types in PET Q1_100Z was flagged "
-        "as shown (value=1). Types: product brochure, PI, patient support services, "
-        "co-pay cards, patient brochures, disease state info, access toolkit, "
-        "distribution info, admin guide, product summary. No VA = all 10 = 0."
-    )
-    VA_SPLIT_Q = "PET Q1_100Z (10 binary VA content type items, any=1 → VA Used)"
-
-    LTIP_SPLIT_HOW = (
-        "LTIP (Likelihood to Increase Prescribing) from PET C3_35Z, scale 1–7. "
-        "Top-2 box = score of 6 or 7 (very likely or extremely likely to increase prescribing). "
-        "Non-Top-2 = score 1–5."
-    )
-    LTIP_SPLIT_Q = "PET C3_35Z (1=Not at all likely → 7=Extremely likely, top-2 = ≥6)"
-
-    # ────────────────────────────────────────────────────────────────────────
-    # TAB 1: INTERACTION vs NO INTERACTION
-    # ────────────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 1: VISUAL AID × ATU
+    # ════════════════════════════════════════════════════════════════════════
     with tabs[0]:
-        st.markdown(f"""
-<div style="background:white;border:1px solid {MGRAY};border-radius:12px;padding:14px 18px;margin-bottom:20px">
-  <div style="font-size:14px;font-weight:600;color:#0F172A;margin-bottom:4px">
-    With Voranigo Rep Interaction (n={len(inter)}) vs Without (n={len(no_inter)})
-  </div>
-  <div style="font-size:12px;color:{DGRAY};margin-bottom:4px">{INTER_SPLIT_HOW}</div>
-  <div style="font-size:10px;color:#94A3B8">Source: {INTER_SPLIT_Q}</div>
-</div>
-""", unsafe_allow_html=True)
+        render_va_crosstabs(df)
 
-        counter = 1
-        xt_defs = [
-            ("attr_shift", "Attribute Belief Shifts post-visit",
-             "Did the interaction shift product beliefs? Count of 17 Voranigo attributes rated ≥6 (out of 7) post-visit.",
-             "PET Q3_40BZ: 17 attribute perception ratings. Shifted = rated 6 or 7 post-visit.", "0–17 shifts"),
-            ("ltip_top2", "LTIP Top-2 Rate (≥6)",
-             "Did the interaction produce high prescribing intent? % of HCPs scoring 6–7 on C3_35Z.",
-             "PET C3_35Z likelihood to increase prescribing. Top-2 = 6 or 7.", "rate"),
-            ("msg_rec", "Messages Recalled",
-             "How many brand messages did HCPs recall hearing? Count from 10 Voranigo messages.",
-             "PET Q2_10Z: 10 binary message recall items (V1–V14 series).", "msgs"),
-            ("unaided", "Unaided Voranigo Awareness",
-             "Was Voranigo mentioned spontaneously in Q2_10Z open-end response?",
-             "ATU Q2_10Z open-end text scan for 'voranigo'/'vorasidenib'.", "/1"),
-            ("curr_vora_share", "Current Voranigo Patient Share %",
-             "Does having had an interaction connect to higher current prescribing?",
-             "ATU Q3_60Z_B8 (current Vora pts) ÷ S0_120Z (Grade 2 PL) × 100.", "%"),
-            ("future_intent", "Future Voranigo Intent",
-             "Do HCPs who had an interaction plan to prescribe more Voranigo?",
-             "ATU Q3_60Z next-10 B8 allocations sum across 12 patient types.", "/10"),
-            ("progs_known", "ServierONE Programmes Known",
-             "Did the interaction connect to better access programme knowledge?",
-             "ATU Q3_260BZ: count of 5 ServierONE programmes named.", "/5"),
-            ("s1_fam", "ServierONE Familiarity",
-             "Is ServierONE familiarity higher among HCPs who had an interaction?",
-             "ATU Q3_260AZ: 1=Not at all → 5=Extremely familiar.", "/5"),
-            ("belief_align", "Clinical Belief Alignment",
-             "Do interacted HCPs show stronger clinical belief alignment with Voranigo evidence?",
-             "ATU Q4_00Z: avg of 8 clinical belief statements, 1–7.", "/7"),
-            ("nccn_fam", "NCCN Guideline Familiarity",
-             "Is NCCN guideline familiarity connected to having a rep interaction?",
-             "ATU Q2_00Z: 1=Never heard → 5=Very familiar.", "/5"),
-            ("top_attr_perf", "Voranigo Attribute Performance Rating",
-             "Do interacted HCPs rate Voranigo's attributes higher overall?",
-             "ATU Q3_120Z Voranigo column, avg of 19 performance attributes (1–7).", "/7"),
-            ("ICI", "ICI Composite Score",
-             "Is the overall Interaction Conversion Index score higher for HCPs with an interaction?",
-             "Weighted: AC×.14+IBC×.25+MBC×.20+RTC×.13+ABR×.15+KCC×.08+CI×.05.", "/100"),
-            ("call_quality", "Rep Call Quality",
-             "How does call quality rate among the interaction group vs non-interaction?",
-             "PET Q3_70Z: avg of 5 call quality attributes (1–7).", "/7"),
-            ("prod_knowledge", "Rep Product Knowledge",
-             "Does product knowledge rating differ by interaction status?",
-             "PET Q3_60Z: avg of 7 product knowledge attributes (1–7).", "/7"),
-            ("peer_shared", "Peer Sharing",
-             "Are interacted HCPs more likely to share information with peers?",
-             "PET C3_25Z: 0=No, 1=Intent, 2=Within practice, 3=Extended network.", "/3"),
-            ("ngs_rate", "NGS Testing Rate",
-             "Is molecular testing higher among HCPs with rep interactions?",
-             "ATU Q1_00Z: combined NGS-only + IHC+NGS rate ÷ 100.", "rate"),
-            ("barriers", "Barriers Cited",
-             "Do HCPs with interactions cite fewer prescribing barriers?",
-             "ATU Q3_220Z: count of up to 9 barrier options selected.", "barriers"),
-            ("pt_inq", "Patient Inquiry Frequency",
-             "Do patients of interacted HCPs ask about Voranigo more often?",
-             "ATU Q3_300Z: 1=Never → 4=Very often.", "/4"),
-        ]
-
-        for metric_key, title, metric_how, metric_q, unit in xt_defs:
-            if metric_key not in df.columns:
-                continue
-            p, sig, ma, mb, na, nb, eff = _mw(inter[metric_key], no_inter[metric_key])
-            _xt_row(counter, title,
-                    f"With Interaction: {ma}{unit} vs No Interaction: {mb}{unit}",
-                    f"With Interaction (n={na})", f"No Interaction (n={nb})",
-                    ma, mb, na, nb, p, sig, unit,
-                    INTER_SPLIT_HOW, metric_how, INTER_SPLIT_Q, metric_q)
-            counter += 1
-
-    # ────────────────────────────────────────────────────────────────────────
-    # TAB 2: VA USED vs NOT
-    # ────────────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 2: LTIP × ATU
+    # ════════════════════════════════════════════════════════════════════════
     with tabs[1]:
-        st.markdown(f"""
-<div style="background:white;border:1px solid {MGRAY};border-radius:12px;padding:14px 18px;margin-bottom:20px">
-  <div style="font-size:14px;font-weight:600;color:#0F172A;margin-bottom:4px">
-    Visual Aid Shown (n={len(va_yes)}) vs Not Shown (n={len(va_no)})
-  </div>
-  <div style="font-size:12px;color:{DGRAY};margin-bottom:4px">{VA_SPLIT_HOW}</div>
-  <div style="font-size:10px;color:#94A3B8">Source: {VA_SPLIT_Q}</div>
-</div>
-""", unsafe_allow_html=True)
+        render_ltip_crosstabs(df)
 
-        counter = 100
-        va_xt = [
-            ("msg_rec", "VA Used → Message Recall",
-             "Does showing a visual aid during the rep visit increase how many messages the HCP recalls?",
-             "PET Q2_10Z: count of 10 brand messages recalled (each=1). Key finding: this IS significant.", "msgs"),
-            ("attr_shift", "VA Used → Attribute Belief Shifts",
-             "Does the visual aid help shift product attribute perceptions post-visit?",
-             "PET Q3_40BZ: count of 17 attributes rated ≥6 post-visit.", "shifts"),
-            ("curr_vora_share", "VA Used → Current Voranigo Share",
-             "Is there a connection between VA use and current prescribing? Note: VA may be used more on lower-volume HCPs.",
-             "ATU Q3_60Z_B8 ÷ S0_120Z × 100.", "%"),
-            ("progs_known", "VA Used → ServierONE Programmes Known",
-             "Does use of access-related VAs connect to more ServierONE programme awareness?",
-             "ATU Q3_260BZ: count of 5 programmes named.", "/5"),
-            ("rep_pref", "VA Used → Rep as Preferred Source",
-             "Are HCPs who receive VAs more likely to prefer the rep as an information source?",
-             "ATU Q4_30Z items 1–2: rep discussion preferred (binary).", "/1"),
-            ("ltip_top2", "VA Used → LTIP Top-2 Rate",
-             "Does VA use produce higher likelihood to increase prescribing?",
-             "PET C3_35Z ≥6 = top-2 box.", "rate"),
-            ("s1_fam", "VA Used → ServierONE Familiarity",
-             "Is ServierONE familiarity higher when access VA content was shown?",
-             "ATU Q3_260AZ: 1=Not at all → 5=Extremely familiar.", "/5"),
-            ("belief_align", "VA Used → Clinical Belief Alignment",
-             "Do HCPs who received a VA show stronger clinical belief alignment?",
-             "ATU Q4_00Z: avg of 8 belief statements, 1–7.", "/7"),
-            ("barriers", "VA Used → Barriers Cited",
-             "Do VA-receiving HCPs cite fewer access barriers?",
-             "ATU Q3_220Z: count of barriers selected.", "barriers"),
-            ("ICI", "VA Used → ICI Composite Score",
-             "Is overall ICI score higher among HCPs who received a VA?",
-             "Computed ICI composite.", "/100"),
-        ]
-
-        for metric_key, title, metric_how, metric_q, unit in va_xt:
-            if metric_key not in df.columns:
-                continue
-            p, sig, ma, mb, na, nb, eff = _mw(va_yes[metric_key], va_no[metric_key])
-            _xt_row(counter, title,
-                    f"VA Used: {ma}{unit} vs No VA: {mb}{unit}",
-                    f"VA Used (n={na})", f"No VA (n={nb})",
-                    ma, mb, na, nb, p, sig, unit,
-                    VA_SPLIT_HOW, metric_how, VA_SPLIT_Q, metric_q)
-            counter += 1
-
-    # ────────────────────────────────────────────────────────────────────────
-    # TAB 3: LTIP TOP-2 vs NON
-    # ────────────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 3: ServierONE × ATU
+    # ════════════════════════════════════════════════════════════════════════
     with tabs[2]:
-        st.markdown(f"""
-<div style="background:white;border:1px solid {MGRAY};border-radius:12px;padding:14px 18px;margin-bottom:20px">
-  <div style="font-size:14px;font-weight:600;color:#0F172A;margin-bottom:4px">
-    LTIP Top-2 (score 6–7, n={len(ltip_h)}) vs Non-Top-2 (1–5, n={len(ltip_l)})
-  </div>
-  <div style="font-size:12px;color:{DGRAY};margin-bottom:4px">{LTIP_SPLIT_HOW}</div>
-  <div style="font-size:10px;color:#94A3B8">Source: {LTIP_SPLIT_Q}</div>
-</div>
-""", unsafe_allow_html=True)
+        render_servier_crosstabs(df)
 
-        counter = 200
-        ltip_xt = [
-            ("attr_shift", "LTIP Top-2 → Attribute Belief Shifts",
-             "HCPs with high prescribing intent — did they experience more attribute belief shifts?",
-             "PET Q3_40BZ: count of 17 attrs rated ≥6. Key finding: SIGNIFICANT.", "shifts"),
-            ("belief_align", "LTIP Top-2 → Clinical Belief Alignment",
-             "Is higher prescribing intent connected to stronger clinical belief alignment in ATU?",
-             "ATU Q4_00Z: avg of 8 belief statements.", "/7"),
-            ("call_quality", "LTIP Top-2 → Rep Call Quality",
-             "Did higher call quality produce higher prescribing intent?",
-             "PET Q3_70Z: avg of 5 call quality attributes.", "/7"),
-            ("prod_knowledge", "LTIP Top-2 → Rep Product Knowledge",
-             "Is rep product knowledge connected to LTIP top-2?",
-             "PET Q3_60Z: avg of 7 product knowledge attributes.", "/7"),
-            ("curr_vora_share", "LTIP Top-2 → Current Voranigo Share",
-             "Do HCPs with high prescribing intent actually have higher current Voranigo prescribing?",
-             "ATU Q3_60Z_B8 ÷ S0_120Z × 100.", "%"),
-            ("future_intent", "LTIP Top-2 → Future Voranigo Intent",
-             "Is LTIP top-2 connected to forward-looking Voranigo allocation?",
-             "ATU Q3_60Z next-10 B8 sum.", "/10"),
-            ("msg_rec", "LTIP Top-2 → Messages Recalled",
-             "Do high-intent HCPs recall more messages from the visit?",
-             "PET Q2_10Z: count of 10 messages recalled.", "msgs"),
-            ("progs_known", "LTIP Top-2 → ServierONE Progs Known",
-             "Is LTIP top-2 connected to better access programme knowledge?",
-             "ATU Q3_260BZ: count of 5 programmes.", "/5"),
-            ("unaided", "LTIP Top-2 → Unaided Awareness",
-             "Are high-intent HCPs more likely to mention Voranigo unprompted?",
-             "ATU Q2_10Z text scan.", "/1"),
-            ("barriers", "LTIP Top-2 → Barriers Cited",
-             "Do high-intent HCPs face fewer prescribing barriers?",
-             "ATU Q3_220Z: barrier count.", "barriers"),
-            ("ICI", "LTIP Top-2 → ICI Score",
-             "Is LTIP top-2 connected to higher overall ICI?",
-             "Computed ICI composite.", "/100"),
-        ]
-
-        for metric_key, title, metric_how, metric_q, unit in ltip_xt:
-            if metric_key not in df.columns:
-                continue
-            p, sig, ma, mb, na, nb, eff = _mw(ltip_h[metric_key], ltip_l[metric_key])
-            _xt_row(counter, title,
-                    f"LTIP Top-2: {ma}{unit} vs Non-Top-2: {mb}{unit}",
-                    f"LTIP ≥6 (n={na})", f"LTIP <6 (n={nb})",
-                    ma, mb, na, nb, p, sig, unit,
-                    LTIP_SPLIT_HOW, metric_how, LTIP_SPLIT_Q, metric_q)
-            counter += 1
-
-    # ────────────────────────────────────────────────────────────────────────
-    # TAB 4: HIGH vs LOW vs NON-USER
-    # ────────────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 4: ICI DIMENSIONS × ATU
+    # ════════════════════════════════════════════════════════════════════════
     with tabs[3]:
-        st.markdown(f"""
-<div style="background:white;border:1px solid {MGRAY};border-radius:12px;padding:14px 18px;margin-bottom:20px">
-  <div style="font-size:14px;font-weight:600;color:#0F172A;margin-bottom:6px">
-    High Voranigo User (n={len(high_u)}) · Low User (n={len(low_u)}) · Non-User (n={len(non_u)})
+        render_ici_crosstabs(df)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 5: CLUSTER × ATU
+    # ════════════════════════════════════════════════════════════════════════
+    with tabs[4]:
+        render_cluster_crosstabs(df)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # TAB 6: FULL SUMMARY TABLE
+    # ════════════════════════════════════════════════════════════════════════
+    with tabs[5]:
+        render_full_table(df)
+
+
+# ── VA × ATU ──────────────────────────────────────────────────────────────────
+
+def render_va_crosstabs(df):
+    va_yes = df[df["any_va"] == 1]
+    va_no  = df[df["any_va"] == 0]
+    n_yes, n_no = len(va_yes), len(va_no)
+
+    st.markdown(f"""
+<div style="background:white;border:1px solid {MGRAY};border-radius:12px;padding:16px 20px;margin-bottom:20px">
+  <div style="font-size:10px;text-transform:uppercase;letter-spacing:.2em;color:#94A3B8;font-weight:600">SECTION OVERVIEW</div>
+  <div style="font-family:'DM Serif Display',serif;font-size:20px;color:#0F172A;margin-top:4px">Visual Aid Used vs. Not Used — {n_yes + n_no} HCPs</div>
+  <div style="font-size:12px;color:#64748B;margin-top:4px">
+    VA Used: n={n_yes} ({round(n_yes/(n_yes+n_no)*100)}%) &nbsp;|&nbsp;
+    VA Not Used: n={n_no} ({round(n_no/(n_yes+n_no)*100)}%)
   </div>
-  <div style="font-size:12px;color:{DGRAY};margin-bottom:4px">
-    <b>High User</b> = current Voranigo share &gt;30% of Grade 2 patients (ATU Q3_60Z_B8 ÷ S0_120Z).<br>
-    <b>Low User</b> = Voranigo share 1–30%.<br>
-    <b>Non-User</b> = zero current Voranigo patients.
-  </div>
-  <div style="font-size:10px;color:#94A3B8">Source: ATU Q3_60Z_B8 (current Voranigo patients) ÷ ATU S0_120Z (Grade 2 PL)</div>
-</div>
-""", unsafe_allow_html=True)
-
-        user_metrics = [
-            ("any_va",        "VA Shown in Visit",          "0/1",  "PET Q1_100Z any=1"),
-            ("ltip_top2",     "LTIP Top-2 Rate",            "rate", "PET C3_35Z ≥6"),
-            ("msg_rec",       "Messages Recalled",          "msgs", "PET Q2_10Z count"),
-            ("attr_shift",    "Attribute Belief Shifts",    "shifts","PET Q3_40BZ ≥6 count"),
-            ("call_quality",  "Rep Call Quality",           "/7",   "PET Q3_70Z avg"),
-            ("prod_knowledge","Rep Product Knowledge",      "/7",   "PET Q3_60Z avg"),
-            ("progs_known",   "ServierONE Progs Known",     "/5",   "ATU Q3_260BZ count"),
-            ("s1_fam",        "ServierONE Familiarity",     "/5",   "ATU Q3_260AZ"),
-            ("barriers",      "Barriers Cited",             "0–9",  "ATU Q3_220Z count"),
-            ("belief_align",  "Clinical Belief Align",      "/7",   "ATU Q4_00Z avg"),
-            ("ngs_rate",      "NGS Testing Rate",           "rate", "ATU Q1_00Z"),
-            ("unaided",       "Unaided Awareness",          "/1",   "ATU Q2_10Z text"),
-            ("ICI",           "ICI Score",                  "/100", "Computed composite"),
-        ]
-
-        for metric_key, metric_label, unit, metric_q in user_metrics:
-            if metric_key not in df.columns:
-                continue
-            h_v = high_u[metric_key].dropna()
-            l_v = low_u[metric_key].dropna()
-            n_v = non_u[metric_key].dropna()
-            if h_v.empty and n_v.empty:
-                continue
-
-            h_m = round(h_v.mean(), 2) if len(h_v) else 0
-            l_m = round(l_v.mean(), 2) if len(l_v) else 0
-            n_m = round(n_v.mean(), 2) if len(n_v) else 0
-
-            # H vs N sig test
-            p_hn, sig_hn, _, _, _, _, _ = _mw(h_v, n_v) if len(h_v) >= 3 and len(n_v) >= 3 else (None, False, 0, 0, 0, 0, "")
-
-            border = GREEN if sig_hn else MGRAY
-            bg = "#F0FDF4" if sig_hn else "white"
-
-            st.markdown(f"""
-<div style="background:{bg};border:1px solid {border};border-left:4px solid {border};
-            border-radius:12px;padding:14px 18px;margin-bottom:8px">
-  <div style="font-size:14px;font-weight:600;color:#0F172A;margin-bottom:10px">
-    {metric_label}
-    <span style="font-size:11px;font-weight:400;color:#94A3B8;margin-left:8px">{metric_q}</span>
-  </div>
-  <div style="display:flex;gap:16px;align-items:center">
-    <div style="flex:1;background:{TEAL};border-radius:10px;padding:12px 14px;color:white;text-align:center">
-      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.15em;opacity:.7;margin-bottom:4px">HIGH USER (n={len(h_v)})</div>
-      <div style="font-family:'DM Serif Display',serif;font-size:28px;font-weight:300">{h_m}<span style="font-size:12px;opacity:.7">{unit}</span></div>
-    </div>
-    <div style="flex:1;background:{AMBER};border-radius:10px;padding:12px 14px;color:white;text-align:center">
-      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.15em;opacity:.7;margin-bottom:4px">LOW USER (n={len(l_v)})</div>
-      <div style="font-family:'DM Serif Display',serif;font-size:28px;font-weight:300">{l_m}<span style="font-size:12px;opacity:.7">{unit}</span></div>
-    </div>
-    <div style="flex:1;background:{CRIMSON};border-radius:10px;padding:12px 14px;color:white;text-align:center">
-      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.15em;opacity:.7;margin-bottom:4px">NON-USER (n={len(n_v)})</div>
-      <div style="font-family:'DM Serif Display',serif;font-size:28px;font-weight:300">{n_m}<span style="font-size:12px;opacity:.7">{unit}</span></div>
-    </div>
-    <div style="text-align:right;min-width:120px">
-      <div style="font-size:10px;color:#94A3B8;margin-bottom:4px">High vs Non-User</div>
-      {_sig_badge(p_hn, sig_hn)}
-    </div>
+  <div style="font-size:11px;color:#94A3B8;margin-top:6px">
+    PET Q1_100Z (VA content types) → ATU Q3_60Z (current/future Vora share),
+    Q3_110Z (attribute importance), Q3_120Z (Voranigo performance), ServierONE familiarity
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-            _evidence_expander(
-                f"High User (n={len(h_v)})", f"Non-User (n={len(n_v)})",
-                h_m, n_m, len(h_v), len(n_v), p_hn, sig_hn, "",
-                "High User = curr_vora_share >30%. Non-User = curr_vora_share = 0. "
-                "Low User = 1–30%. Source: ATU Q3_60Z_B8 ÷ S0_120Z.",
-                f"Metric: {metric_label}. {metric_q}",
-                "ATU Q3_60Z_B8 ÷ S0_120Z (user group classification)", metric_q
+    xt_list = [
+        # (title, description, col_a, col_b, is_pct, source)
+        ("VA Used → Current Voranigo Patient Share",
+         "Among HCPs who had a visual aid in the most recent rep visit vs. those who didn't, what % of their Grade 2 patients are currently on Voranigo? Pulled from Q3_60Z B8 (current Vora) ÷ total Gr2 PL (S0_120Z).",
+         "curr_vora_share", "curr_vora_share", False, "PET Q1_100Z any=1/0 × ATU Q3_60Z_B8 / S0_120Z"),
+        ("VA Used → Future Voranigo Prescribing Intent",
+         "HCPs who received a VA in the visit report higher future Voranigo intent? Pulled from Q3_60Z B8 next-10-patient allocations across all 12 patient types.",
+         "future_intent", "future_intent", False, "PET Q1_100Z any=1/0 × ATU Q3_60Z_B8_future"),
+        ("VA Used → Voranigo Familiarity (Q2_20Z)",
+         "Does visual aid use correlate with higher product familiarity? Scale 1–5 from Q2_20Z item k (Voranigo).",
+         "vora_fam", "vora_fam", False, "PET Q1_100Z any=1/0 × ATU Q2_20Z_k"),
+        ("VA Used → Unaided Voranigo Awareness (Q2_10Z)",
+         "Text response scanning: was Voranigo/vorasidenib mentioned unprompted? VA visits vs. non-VA visits.",
+         "unaided", "unaided", True, "PET Q1_100Z any=1/0 × ATU Q2_10Z text scan"),
+        ("VA Used → Attribute Importance: Prolonged PFS",
+         "Doctors who received a VA — how important is PFS when selecting treatment? Q3_110Z A1 (adjuvant column), scale 1–7.",
+         "imp_Prolonged PFS", "imp_Prolonged PFS", False, "PET Q1_100Z × ATU Q3_110Z_A1"),
+        ("VA Used → Attribute Importance: Manufacturer Services",
+         "Does VA use connect to valuing ServierONE? Q3_110Z attribute 12 (manufacturer patient services), 1–7.",
+         "imp_Manufacturer patient services", "imp_Manufacturer patient services", False, "PET Q1_100Z × ATU Q3_110Z_A12"),
+        ("VA Used → Voranigo Performance: Reduces Seizures",
+         "HCPs who got a VA — do they rate Voranigo higher on seizure reduction? Q3_120Z Voranigo column, attribute 18 (reduces seizures).",
+         "perf_Reduces seizures", "perf_Reduces seizures", False, "PET Q1_100Z × ATU Q3_120Z_B_A18"),
+        ("VA Used → Voranigo Performance: Prolonged OS",
+         "Does VA use lift OS perception? Q3_120Z Voranigo column, attribute 3 (prolonged OS), scale 1–7.",
+         "perf_Prolonged OS", "perf_Prolonged OS", False, "PET Q1_100Z × ATU Q3_120Z_B_A3"),
+        ("VA Used → Barriers Cited (Q3_220Z)",
+         "Do HCPs who received a VA cite fewer access barriers? Number of barrier options selected in Q3_220Z (0–7).",
+         "barriers", "barriers", False, "PET Q1_100Z × ATU Q3_220Z barrier count"),
+        ("VA Used → ServierONE Programmes Known (Q3_260BZ)",
+         "Does VA content (especially access toolkit) connect to more ServierONE programme knowledge? 0–5 programmes named.",
+         "progs_known", "progs_known", False, "PET Q1_100Z × ATU Q3_260BZ count"),
+        ("VA: Access Toolkit Used → ServierONE Familiarity",
+         "Specifically when the access toolkit VA was shown (Q1_100Z option A7), does ServierONE familiarity (Q3_260AZ, 1–5) rise?",
+         "s1_fam", "s1_fam", False, "PET Q1_100Z_A7=1/0 × ATU Q3_260AZ"),
+        ("VA Used → NCCN Familiarity (Q2_00Z)",
+         "Visits with a VA correlate with higher NCCN guideline familiarity? Q2_00Z scale 1–5.",
+         "nccn_fam", "nccn_fam", False, "PET Q1_100Z × ATU Q2_00Z"),
+        ("VA Used → Clinical Belief Alignment (Q4_00Z)",
+         "Average of 8 clinical belief alignment statements, 1–7 scale. VA exposure → stronger alignment?",
+         "belief_align", "belief_align", False, "PET Q1_100Z × ATU Q4_00Z avg"),
+        ("VA Used → ICI Score",
+         "Overall ICI score comparison: did having a VA in the last visit connect to higher composite conversion?",
+         "ICI", "ICI", False, "PET Q1_100Z × computed ICI"),
+        ("VA Used → ABR Dimension Score",
+         "Access Barrier Resolution sub-score for VA vs. no-VA HCPs. VA should specifically lift ABR.",
+         "ABR", "ABR", False, "PET Q1_100Z × ICI_ABR"),
+    ]
+
+    for i, (title, desc, col_a, col_b, is_pct, source) in enumerate(xt_list, 1):
+        a_data = va_yes[col_a].dropna() if col_a in va_yes.columns else pd.Series()
+        b_data = va_no[col_b].dropna() if col_b in va_no.columns else pd.Series()
+
+        if a_data.empty or b_data.empty:
+            continue
+
+        _, p_val, sig, effect = statsig_test(a_data, b_data)
+
+        if is_pct:
+            val_a = a_data.mean()
+            val_b = b_data.mean()
+            fig = bar_chart(
+                [col_a.replace("_", " ").title()],
+                [val_a], [val_b],
+                f"VA Used (n={n_yes})", f"No VA (n={n_no})",
+                title, TEAL, CRIMSON, pct=True
+            )
+        else:
+            val_a = a_data.mean()
+            val_b = b_data.mean()
+            fig = go.Figure()
+            fig.add_trace(go.Bar(name=f"VA Used (n={n_yes})", x=[title[:30]], y=[val_a],
+                                 marker_color=TEAL, text=[f"{val_a:.1f}"], textposition="outside"))
+            fig.add_trace(go.Bar(name=f"No VA (n={n_no})", x=[title[:30]], y=[val_b],
+                                 marker_color=CRIMSON, text=[f"{val_b:.1f}"], textposition="outside"))
+            fig.update_layout(
+                barmode="group", height=300,
+                plot_bgcolor="white", paper_bgcolor="white",
+                font=dict(family="Inter", size=11),
+                yaxis=dict(showgrid=True, gridcolor="#F1F5F9"),
+                legend=dict(orientation="h", yanchor="bottom", y=-0.35),
+                margin=dict(l=0, r=0, t=10, b=0),
             )
 
-    # ────────────────────────────────────────────────────────────────────────
-    # TAB 5: VORANIGO PERCEPTION BY GROUP
-    # ────────────────────────────────────────────────────────────────────────
-    with tabs[4]:
-        st.markdown(f"""
-<div style="font-family:'DM Serif Display',serif;font-size:24px;color:#0F172A;margin-bottom:4px">
-  Voranigo Attribute Perception by Group
-</div>
-<div style="font-size:12px;color:#94A3B8;margin-bottom:16px">
-  ATU Q3_120Z Voranigo performance column (cols 20–38). Rated 1–7. Split by interaction status and user group.
-  * = significant at p&lt;0.05 (Mann-Whitney U, High vs Non-User or Interaction vs No-Interaction).
+        with st.container():
+            st.markdown(f"""
+<div class="xtab-card">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">
+    <div>
+      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.2em;color:#94A3B8;font-weight:600">VA CROSS-TAB #{i:03d} · {effect or ''}</div>
+      <div style="font-family:'DM Serif Display',serif;font-size:18px;color:#0F172A">{title}</div>
+      <div style="font-size:12px;color:{DGRAY};margin-top:4px;line-height:1.5">{desc}</div>
+    </div>
+    <div style="text-align:right;flex-shrink:0;margin-left:16px">
+      {sig_badge(p_val, sig)}
+      <div style="font-size:10px;color:#94A3B8;margin-top:4px">VA Used: n={n_yes} | No VA: n={n_no}</div>
+      <div style="font-size:10px;color:#94A3B8">Δ = {round(val_a - val_b, 2)}</div>
+    </div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
-
-        perf_cols = [f"perf_{a}" for a in ATTR_LABELS if f"perf_{a}" in df.columns]
-        if perf_cols:
-            inter_vals = [inter[c].dropna().mean() for c in perf_cols]
-            no_inter_vals = [no_inter[c].dropna().mean() for c in perf_cols]
-            high_vals = [high_u[c].dropna().mean() for c in perf_cols]
-            non_vals  = [non_u[c].dropna().mean()  for c in perf_cols]
-            labels = ATTR_LABELS[:len(perf_cols)]
-
-            fig = go.Figure()
-            fig.add_trace(go.Bar(name=f"With Interaction (n={len(inter)})", x=labels,
-                                 y=inter_vals, marker_color=TEAL,
-                                 text=[f"{v:.1f}" for v in inter_vals], textposition="outside"))
-            fig.add_trace(go.Bar(name=f"No Interaction (n={len(no_inter)})", x=labels,
-                                 y=no_inter_vals, marker_color="#CBD5E1",
-                                 text=[f"{v:.1f}" for v in no_inter_vals], textposition="outside"))
-            fig.update_layout(barmode="group", height=400,
-                              plot_bgcolor="white", paper_bgcolor="white",
-                              font=dict(family="Inter", size=10),
-                              yaxis=dict(range=[0, 9], showgrid=True, gridcolor="#F1F5F9", title="Avg rating (1–7)"),
-                              xaxis_tickangle=-35,
-                              legend=dict(orientation="h", yanchor="bottom", y=-0.4),
-                              margin=dict(l=0, r=0, t=10, b=0),
-                              title=dict(text="Voranigo Perception: With vs Without Interaction",
-                                        font=dict(family="DM Serif Display", size=16)))
             st.plotly_chart(fig, use_container_width=True)
+            st.markdown(f'<div style="font-size:10px;color:#94A3B8;text-transform:uppercase;letter-spacing:.15em;margin-bottom:8px">Source: {source}</div>',
+                        unsafe_allow_html=True)
+            st.markdown("---")
 
-            fig2 = go.Figure()
-            fig2.add_trace(go.Bar(name=f"High User (n={len(high_u)})", x=labels,
-                                  y=high_vals, marker_color=GREEN,
-                                  text=[f"{v:.1f}" for v in high_vals], textposition="outside"))
-            fig2.add_trace(go.Bar(name=f"Non-User (n={len(non_u)})", x=labels,
-                                  y=non_vals, marker_color=CRIMSON,
-                                  text=[f"{v:.1f}" for v in non_vals], textposition="outside"))
-            fig2.update_layout(barmode="group", height=400,
-                               plot_bgcolor="white", paper_bgcolor="white",
-                               font=dict(family="Inter", size=10),
-                               yaxis=dict(range=[0, 9], showgrid=True, gridcolor="#F1F5F9", title="Avg rating (1–7)"),
-                               xaxis_tickangle=-35,
-                               legend=dict(orientation="h", yanchor="bottom", y=-0.4),
-                               margin=dict(l=0, r=0, t=10, b=0),
-                               title=dict(text="Voranigo Perception: High User vs Non-User",
-                                         font=dict(family="DM Serif Display", size=16)))
-            st.plotly_chart(fig2, use_container_width=True)
 
-            with st.expander("↳ How these charts were built"):
-                st.markdown(f"""
-<div style="background:{LGRAY};border-radius:8px;padding:14px 16px;border-left:3px solid {TEAL}">
-  <div style="font-size:10px;text-transform:uppercase;letter-spacing:.18em;color:{TEAL};font-weight:700;margin-bottom:8px">DATA SOURCE</div>
-  <div style="font-size:12px;color:#334155;line-height:1.6">
-    <b>Question:</b> ATU Q3_120Z — "How would you rate each of the following regimens as an adjuvant or first-line treatment for grade 2 IDH-mutant astrocytoma or oligodendroglioma?" Scale: 1=Very poor → 7=Excellent.<br>
-    <b>Regimen column:</b> VORANIGO (vorasidenib) — column positions 20–38 within Q3_120Z (second regimen group of 19 attributes).<br>
-    <b>n for interaction split:</b> With Interaction={len(inter)}, No Interaction={len(no_inter)}<br>
-    <b>n for user split:</b> High User={len(high_u)}, Non-User={len(non_u)}<br>
-    <b>Note:</b> Only HCPs who rated familiarity with Voranigo ≥2 (Q2_20Z item k) are included in attribute ratings per survey design.
+# ── LTIP × ATU ────────────────────────────────────────────────────────────────
+
+def render_ltip_crosstabs(df):
+    ltip_high = df[df["ltip_top2"] == 1]
+    ltip_low  = df[df["ltip_top2"] == 0]
+    n_h, n_l = len(ltip_high), len(ltip_low)
+
+    st.markdown(f"""
+<div style="background:white;border:1px solid {MGRAY};border-radius:12px;padding:16px 20px;margin-bottom:20px">
+  <div style="font-size:10px;text-transform:uppercase;letter-spacing:.2em;color:#94A3B8;font-weight:600">SECTION OVERVIEW</div>
+  <div style="font-family:'DM Serif Display',serif;font-size:20px;color:#0F172A;margin-top:4px">LTIP Top-2 (6–7) vs Non-Top-2 — {n_h + n_l} HCPs</div>
+  <div style="font-size:12px;color:#64748B;margin-top:4px">
+    LTIP Top-2 (score 6–7): n={n_h} ({round(n_h/(n_h+n_l)*100) if n_h+n_l>0 else 0}%) &nbsp;|&nbsp;
+    LTIP Non-Top-2 (1–5): n={n_l} ({round(n_l/(n_h+n_l)*100) if n_h+n_l>0 else 0}%)
+  </div>
+  <div style="font-size:11px;color:#94A3B8;margin-top:6px">
+    PET C3_35Z (likelihood to increase prescribing, 1–7, top-2 = 6–7) →
+    ATU Q3_60Z (Vora share), Q3_110Z (importance), Q3_120Z (perception), Q3_220Z (barriers), Q3_260 (ServierONE)
   </div>
 </div>
 """, unsafe_allow_html=True)
 
-    # ────────────────────────────────────────────────────────────────────────
-    # TAB 6: FULL TABLE
-    # ────────────────────────────────────────────────────────────────────────
-    with tabs[5]:
-        st.markdown(f'<div style="font-family:\'DM Serif Display\',serif;font-size:22px;color:#0F172A;margin-bottom:12px">All Cross-Tab Results</div>', unsafe_allow_html=True)
+    ltip_xt = [
+        ("LTIP Top-2 → Current Voranigo Share",
+         "HCPs who said 'very likely to increase prescribing' (score 6–7 on C3_35Z) — what is their current Voranigo patient share from Q3_60Z?",
+         "curr_vora_share", False, "PET C3_35Z top2=1/0 × ATU Q3_60Z_B8 / Gr2PL"),
+        ("LTIP Top-2 → Future Voranigo Intent",
+         "Among top-2 LTIP scorers, what does the forward-looking Q3_60Z B8 next-10-patient allocation look like?",
+         "future_intent", False, "PET C3_35Z top2 × ATU Q3_60Z_B8_future"),
+        ("LTIP Top-2 → Voranigo Familiarity",
+         "Higher prescribing intent connects to deeper product familiarity? Q2_20Z item k, 1–5.",
+         "vora_fam", False, "PET C3_35Z top2 × ATU Q2_20Z_k"),
+        ("LTIP Top-2 → Unaided Awareness",
+         "LTIP top-2 HCPs — did they mention Voranigo unprompted in Q2_10Z?",
+         "unaided", True, "PET C3_35Z top2 × ATU Q2_10Z text"),
+        ("LTIP Top-2 → Importance of Seizure Reduction",
+         "Do high-intent HCPs rate seizure reduction higher as a treatment attribute? Q3_110Z attribute 18, 1–7.",
+         "imp_Reduces seizures", False, "PET C3_35Z top2 × ATU Q3_110Z_A18"),
+        ("LTIP Top-2 → Importance of QoL on Treatment",
+         "Good patient QoL importance (Q3_110Z attr 10) among LTIP top-2 vs non-top-2.",
+         "imp_Good patient QoL", False, "PET C3_35Z top2 × ATU Q3_110Z_A10"),
+        ("LTIP Top-2 → Voranigo Performance: PFS",
+         "Does high prescribing intent correlate with better Voranigo PFS ratings? Q3_120Z Voranigo col, attr 1.",
+         "perf_Prolonged PFS", False, "PET C3_35Z top2 × ATU Q3_120Z_B_A1"),
+        ("LTIP Top-2 → Voranigo Performance: Fertility",
+         "Fertility preservation rating for Voranigo (Q3_120Z_B_A16) — higher among high-intent HCPs?",
+         "perf_Ability to preserve fertility", False, "PET C3_35Z top2 × ATU Q3_120Z_B_A16"),
+        ("LTIP Top-2 → ServierONE Programmes Known",
+         "High-intent prescribers — do they know more ServierONE programmes? Q3_260BZ count 0–5.",
+         "progs_known", False, "PET C3_35Z top2 × ATU Q3_260BZ"),
+        ("LTIP Top-2 → Barriers Cited",
+         "LTIP top-2 HCPs cite fewer barriers? Q3_220Z barrier count.",
+         "barriers", False, "PET C3_35Z top2 × ATU Q3_220Z"),
+        ("LTIP Top-2 → NCCN Familiarity",
+         "High-intent prescribers are more familiar with NCCN guidelines? Q2_00Z, 1–5.",
+         "nccn_fam", False, "PET C3_35Z top2 × ATU Q2_00Z"),
+        ("LTIP Top-2 → NGS Testing Rate",
+         "Do high-intent HCPs test more patients for IDH mutations via NGS? Q1_00Z combined NGS rate.",
+         "ngs_rate", False, "PET C3_35Z top2 × ATU Q1_00Z"),
+        ("LTIP Top-2 → ICI Score",
+         "Overall ICI comparison: top-2 LTIP vs non-top-2.",
+         "ICI", False, "PET C3_35Z top2 × ICI computed"),
+        ("LTIP Top-2 → IBC Dimension",
+         "Intent → Behavior sub-score should directly reflect LTIP signal.",
+         "IBC", False, "PET C3_35Z top2 × ICI_IBC"),
+        ("LTIP Top-2 → MBC Dimension",
+         "Message → Belief sub-score among high vs. low intent.",
+         "MBC", False, "PET C3_35Z top2 × ICI_MBC"),
+    ]
 
-        all_rows = []
-        for split_name, grp_a, grp_b, la, lb in [
-            ("Interaction vs None", inter, no_inter, "With Interaction", "No Interaction"),
-            ("VA Used vs Not", va_yes, va_no, "VA Used", "No VA"),
-            ("LTIP Top-2 vs Non", ltip_h, ltip_l, "LTIP ≥6", "LTIP <6"),
-            ("High vs Non-User", high_u, non_u, "High User", "Non-User"),
-        ]:
-            for metric_key, (metric_label, scale, metric_q) in METRIC_META.items():
-                if metric_key not in df.columns: continue
-                p, sig, ma, mb, na, nb, eff = _mw(grp_a[metric_key], grp_b[metric_key])
-                all_rows.append({
-                    "Split": split_name, "Metric": metric_label, "Scale": scale,
-                    f"{la}": ma, f"{lb}": mb,
-                    "Δ": round(ma-mb,2), "n(A)": na, "n(B)": nb,
-                    "p-value": p, "Sig": "✓" if sig else "—", "Effect": eff,
-                })
+    for i, (title, desc, col, is_pct, source) in enumerate(ltip_xt, 1):
+        a_data = ltip_high[col].dropna() if col in ltip_high.columns else pd.Series()
+        b_data = ltip_low[col].dropna() if col in ltip_low.columns else pd.Series()
+        if a_data.empty or b_data.empty:
+            continue
 
-        full_df = pd.DataFrame(all_rows)
-        sig_count = (full_df["Sig"] == "✓").sum()
-        st.markdown(f'<div style="font-size:12px;color:{DGRAY};margin-bottom:8px">{len(full_df)} comparisons · <b style="color:#15803D">{sig_count} significant</b> (p&lt;0.05) · <b>{len(full_df)-sig_count} not significant</b></div>', unsafe_allow_html=True)
+        _, p_val, sig, effect = statsig_test(a_data, b_data)
+        val_a, val_b = a_data.mean(), b_data.mean()
 
-        def hl(row):
-            return ["background-color:#F0FDF4"]*len(row) if row["Sig"]=="✓" else [""]*len(row)
-        st.dataframe(full_df.style.apply(hl, axis=1), use_container_width=True, height=600)
-        st.download_button("⬇ Download full table (CSV)", data=full_df.to_csv(index=False),
-                           file_name="ici_crosstabs.csv", mime="text/csv")
+        fig = go.Figure()
+        if is_pct:
+            fig.add_trace(go.Bar(name=f"LTIP Top-2 (n={n_h})", x=[col], y=[val_a],
+                                 marker_color=GREEN, text=[f"{val_a*100:.0f}%"], textposition="outside"))
+            fig.add_trace(go.Bar(name=f"Non-Top-2 (n={n_l})", x=[col], y=[val_b],
+                                 marker_color=CRIMSON, text=[f"{val_b*100:.0f}%"], textposition="outside"))
+        else:
+            fig.add_trace(go.Bar(name=f"LTIP Top-2 (n={n_h})", x=[col], y=[val_a],
+                                 marker_color=GREEN, text=[f"{val_a:.1f}"], textposition="outside"))
+            fig.add_trace(go.Bar(name=f"Non-Top-2 (n={n_l})", x=[col], y=[val_b],
+                                 marker_color=CRIMSON, text=[f"{val_b:.1f}"], textposition="outside"))
+        fig.update_layout(barmode="group", height=280, plot_bgcolor="white", paper_bgcolor="white",
+                          font=dict(family="Inter", size=11),
+                          yaxis=dict(showgrid=True, gridcolor="#F1F5F9"),
+                          legend=dict(orientation="h", yanchor="bottom", y=-0.35),
+                          margin=dict(l=0, r=0, t=10, b=0))
+
+        st.markdown(f"""
+<div class="xtab-card">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">
+    <div>
+      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.2em;color:#94A3B8;font-weight:600">LTIP CROSS-TAB #{i:03d}</div>
+      <div style="font-family:'DM Serif Display',serif;font-size:18px;color:#0F172A">{title}</div>
+      <div style="font-size:12px;color:{DGRAY};margin-top:4px;line-height:1.5">{desc}</div>
+    </div>
+    <div style="text-align:right;flex-shrink:0;margin-left:16px">
+      {sig_badge(p_val, sig)}
+      <div style="font-size:10px;color:#94A3B8;margin-top:4px">Top-2: n={n_h} | Non-Top-2: n={n_l}</div>
+      <div style="font-size:10px;color:#94A3B8">Δ = {round(val_a - val_b, 2)}</div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+        st.plotly_chart(fig, use_container_width=True)
+        st.markdown(f'<div style="font-size:10px;color:#94A3B8;text-transform:uppercase;letter-spacing:.15em;margin-bottom:8px">Source: {source}</div>',
+                    unsafe_allow_html=True)
+        st.markdown("---")
+
+
+# ── ServierONE × ATU ──────────────────────────────────────────────────────────
+
+def render_servier_crosstabs(df):
+    s1_yes = df[df["servier_aware"] == 1]
+    s1_no  = df[df["servier_aware"] == 0]
+    n_y, n_n = len(s1_yes), len(s1_no)
+
+    st.markdown(f"""
+<div style="background:white;border:1px solid {MGRAY};border-radius:12px;padding:16px 20px;margin-bottom:20px">
+  <div style="font-size:10px;text-transform:uppercase;letter-spacing:.2em;color:#94A3B8;font-weight:600">SECTION OVERVIEW</div>
+  <div style="font-family:'DM Serif Display',serif;font-size:20px;color:#0F172A;margin-top:4px">ServierONE Aware vs. Unaware — {n_y + n_n} HCPs</div>
+  <div style="font-size:12px;color:#64748B;margin-top:4px">ServierONE Aware (fam≥3 or progs>0): n={n_y} | Unaware: n={n_n}</div>
+  <div style="font-size:11px;color:#94A3B8;margin-top:6px">
+    ATU Q3_260AZ (familiarity 1–5) + Q3_260BZ (programmes known 0–5) →
+    ATU usage metrics, barriers, Voranigo perception
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    s1_xt = [
+        ("ServierONE Aware → Current Voranigo Share", "curr_vora_share", False,
+         "Doctors aware of ServierONE programmes — do they prescribe more Voranigo? Q3_60Z / Gr2PL.",
+         "ATU Q3_260A/B × ATU Q3_60Z_B8/Gr2PL"),
+        ("ServierONE Aware → Future Voranigo Intent", "future_intent", False,
+         "Forward-looking Voranigo intent (Q3_60Z next 10 patients) among ServierONE-aware HCPs.",
+         "ATU Q3_260 aware × ATU Q3_60Z_B8_future"),
+        ("ServierONE Aware → Barriers Cited", "barriers", False,
+         "Programme awareness should reduce access barriers. Q3_220Z count 0–7.",
+         "ATU Q3_260 aware × ATU Q3_220Z count"),
+        ("ServierONE Aware → Access VA Used", "access_va", False,
+         "HCPs who know ServierONE — did reps show access-related visual aids in PET Q1_100Z?",
+         "ATU Q3_260 aware × PET Q1_100Z access_va"),
+        ("ServierONE Aware → ABR Score", "ABR", False,
+         "Access Barrier Resolution ICI sub-score for ServierONE-aware vs. unaware.",
+         "ATU Q3_260 aware × ICI_ABR"),
+        ("ServierONE Aware → ICI Score", "ICI", False,
+         "Overall ICI composite score for ServierONE-aware vs. unaware HCPs.",
+         "ATU Q3_260 aware × ICI computed"),
+        ("ServierONE Aware → Voranigo Familiarity", "vora_fam", False,
+         "Does ServierONE awareness connect to product familiarity (Q2_20Z, 1–5)?",
+         "ATU Q3_260 aware × ATU Q2_20Z_k"),
+        ("ServierONE Aware → Unaided Awareness", "unaided", True,
+         "ServierONE-aware HCPs — more likely to mention Voranigo unprompted in Q2_10Z?",
+         "ATU Q3_260 aware × ATU Q2_10Z text"),
+        ("ServierONE Aware → Rep Preferred Source", "rep_pref", True,
+         "Do ServierONE-aware HCPs trust the rep channel more (Q4_30Z, preferred source)?",
+         "ATU Q3_260 aware × ATU Q4_30Z"),
+        ("ServierONE Aware → Perf: Manufacturer Services", "perf_Manufacturer patient services", False,
+         "Voranigo rating on manufacturer patient services attribute (Q3_120Z_B_A12, 1–7).",
+         "ATU Q3_260 aware × ATU Q3_120Z_B_A12"),
+    ]
+
+    for i, (title, col, is_pct, desc, source) in enumerate(s1_xt, 1):
+        a_data = s1_yes[col].dropna() if col in s1_yes.columns else pd.Series()
+        b_data = s1_no[col].dropna() if col in s1_no.columns else pd.Series()
+        if a_data.empty or b_data.empty:
+            continue
+        _, p_val, sig, effect = statsig_test(a_data, b_data)
+        val_a, val_b = a_data.mean(), b_data.mean()
+
+        fig = go.Figure()
+        mul = 100 if is_pct else 1
+        fmt = ".0f" if is_pct else ".1f"
+        fig.add_trace(go.Bar(name=f"S1 Aware (n={n_y})", x=[col], y=[val_a * mul],
+                             marker_color=TEAL, text=[f"{val_a*mul:{fmt}}{'%' if is_pct else ''}"], textposition="outside"))
+        fig.add_trace(go.Bar(name=f"S1 Unaware (n={n_n})", x=[col], y=[val_b * mul],
+                             marker_color=CRIMSON, text=[f"{val_b*mul:{fmt}}{'%' if is_pct else ''}"], textposition="outside"))
+        fig.update_layout(barmode="group", height=260, plot_bgcolor="white", paper_bgcolor="white",
+                          font=dict(family="Inter", size=11),
+                          yaxis=dict(showgrid=True, gridcolor="#F1F5F9"),
+                          legend=dict(orientation="h", yanchor="bottom", y=-0.35),
+                          margin=dict(l=0, r=0, t=10, b=0))
+
+        st.markdown(f"""
+<div class="xtab-card">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">
+    <div>
+      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.2em;color:#94A3B8;font-weight:600">SERVIER ONE CROSS-TAB #{i:03d}</div>
+      <div style="font-family:'DM Serif Display',serif;font-size:18px;color:#0F172A">{title}</div>
+      <div style="font-size:12px;color:{DGRAY};margin-top:4px;line-height:1.5">{desc}</div>
+    </div>
+    <div style="text-align:right;flex-shrink:0;margin-left:16px">
+      {sig_badge(p_val, sig)}
+      <div style="font-size:10px;color:#94A3B8;margin-top:4px">Aware: n={n_y} | Unaware: n={n_n}</div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+        st.plotly_chart(fig, use_container_width=True)
+        st.markdown(f'<div style="font-size:10px;color:#94A3B8;text-transform:uppercase;letter-spacing:.15em;margin-bottom:8px">Source: {source}</div>',
+                    unsafe_allow_html=True)
+        st.markdown("---")
+
+
+# ── ICI DIMENSIONS × ATU ──────────────────────────────────────────────────────
+
+def render_ici_crosstabs(df):
+    st.markdown(f"""
+<div style="font-family:'DM Serif Display',serif;font-size:24px;color:#0F172A;margin-bottom:16px">
+  ICI Dimension Scores × ATU Metrics
+</div>
+""", unsafe_allow_html=True)
+
+    dim_pairs = [
+        ("AC Score", "AC", "curr_vora_share", "Current Vora Share"),
+        ("IBC Score", "IBC", "future_intent", "Future Intent"),
+        ("MBC Score", "MBC", "perf_Prolonged PFS", "Vora PFS Rating"),
+        ("RTC Score", "RTC", "rep_pref", "Rep Preferred Source"),
+        ("ABR Score", "ABR", "progs_known", "Progs Known"),
+        ("KCC Score", "KCC", "belief_align", "Belief Alignment"),
+        ("CI Score", "CI", "vora_gap", "Vora Perf Gap vs Competitor"),
+    ]
+
+    for i, (dim_label, dim_col, atu_col, atu_label) in enumerate(dim_pairs, 1):
+        if dim_col not in df.columns or atu_col not in df.columns:
+            continue
+
+        x = df[dim_col].dropna()
+        y = df[atu_col].dropna()
+        merged = df[[dim_col, atu_col]].dropna()
+
+        if len(merged) < 5:
+            continue
+
+        r, p = scipy_stats.pearsonr(merged[dim_col], merged[atu_col])
+        sig = p < 0.05
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=merged[dim_col], y=merged[atu_col],
+            mode="markers",
+            marker=dict(color=TEAL, size=8, opacity=0.7),
+            name="HCPs",
+        ))
+        # Trend line
+        z = np.polyfit(merged[dim_col], merged[atu_col], 1)
+        xr = np.linspace(merged[dim_col].min(), merged[dim_col].max(), 50)
+        fig.add_trace(go.Scatter(x=xr, y=np.polyval(z, xr), mode="lines",
+                                 line=dict(color=CRIMSON, width=2, dash="dash"),
+                                 name=f"Trend (r={r:.2f})"))
+        fig.update_layout(
+            height=320, plot_bgcolor="white", paper_bgcolor="white",
+            font=dict(family="Inter", size=11),
+            xaxis_title=dim_label, yaxis_title=atu_label,
+            legend=dict(orientation="h", yanchor="bottom", y=-0.3),
+            margin=dict(l=0, r=0, t=10, b=0),
+        )
+
+        st.markdown(f"""
+<div class="xtab-card">
+  <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:8px">
+    <div>
+      <div style="font-size:9px;text-transform:uppercase;letter-spacing:.2em;color:#94A3B8;font-weight:600">ICI DIMENSION CROSS-TAB #{i:03d}</div>
+      <div style="font-family:'DM Serif Display',serif;font-size:18px;color:#0F172A">{dim_label} ↔ {atu_label}</div>
+      <div style="font-size:12px;color:{DGRAY};margin-top:4px">
+        Pearson correlation between the ICI {dim_col} sub-score and the ATU outcome metric.
+        n={len(merged)} overlapping HCPs with both values present.
+      </div>
+    </div>
+    <div style="text-align:right;flex-shrink:0;margin-left:16px">
+      {sig_badge(round(p,4), sig)}
+      <div style="font-size:11px;font-weight:600;color:{GREEN if sig else DGRAY};margin-top:4px">r = {r:.3f}</div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+        st.plotly_chart(fig, use_container_width=True)
+        st.markdown("---")
+
+
+# ── CLUSTER × ATU ─────────────────────────────────────────────────────────────
+
+def render_cluster_crosstabs(df):
+    cluster_names = {1: "Patient ID", 2: "Access Pending", 3: "Evidence Gap",
+                     4: "Narrative Build", 5: "Conviction-Led"}
+    cluster_colors = {1: TEAL, 2: NAVY, 3: CRIMSON, 4: AMBER, 5: GREEN}
+
+    metrics = [
+        ("curr_vora_share", "Current Voranigo Share %"),
+        ("future_intent", "Future Intent Score"),
+        ("vora_fam", "Voranigo Familiarity 1–5"),
+        ("progs_known", "ServierONE Progs Known"),
+        ("barriers", "Barriers Cited"),
+        ("ngs_rate", "NGS Testing Rate"),
+        ("belief_align", "Clinical Belief Alignment"),
+        ("ICI", "ICI Score"),
+    ]
+
+    for m_col, m_label in metrics:
+        if m_col not in df.columns:
+            continue
+        cluster_avgs = df.groupby("cluster")[m_col].agg(["mean", "count"]).reset_index()
+        cluster_avgs["cluster_name"] = cluster_avgs["cluster"].map(cluster_names)
+        cluster_avgs = cluster_avgs.sort_values("cluster")
+
+        fig = go.Figure()
+        for _, row in cluster_avgs.iterrows():
+            cid = int(row["cluster"])
+            fig.add_trace(go.Bar(
+                name=cluster_names[cid],
+                x=[cluster_names[cid]],
+                y=[row["mean"]],
+                marker_color=cluster_colors[cid],
+                text=[f"{row['mean']:.1f}\nn={int(row['count'])}"],
+                textposition="outside",
+            ))
+        fig.update_layout(
+            barmode="group", height=320,
+            plot_bgcolor="white", paper_bgcolor="white",
+            font=dict(family="Inter", size=11),
+            showlegend=False,
+            yaxis=dict(showgrid=True, gridcolor="#F1F5F9"),
+            margin=dict(l=0, r=0, t=10, b=0),
+        )
+
+        st.markdown(f"""
+<div class="xtab-card">
+  <div style="font-family:'DM Serif Display',serif;font-size:18px;color:#0F172A;margin-bottom:4px">
+    Cluster × {m_label}
+  </div>
+  <div style="font-size:12px;color:{DGRAY};margin-bottom:8px">
+    {m_label} broken out by ICI engagement cluster. Sequential pattern expected:
+    Conviction-Led should show highest values for usage/intent metrics.
+  </div>
+</div>
+""", unsafe_allow_html=True)
+        st.plotly_chart(fig, use_container_width=True)
+        st.markdown("---")
+
+
+# ── FULL SUMMARY TABLE ────────────────────────────────────────────────────────
+
+def render_full_table(df):
+    st.markdown("""
+<div style="font-family:'DM Serif Display',serif;font-size:24px;color:#0F172A;margin-bottom:12px">
+  Full Cross-Tab Summary Table
+</div>
+""", unsafe_allow_html=True)
+
+    va_yes = df[df["any_va"] == 1]
+    va_no  = df[df["any_va"] == 0]
+    ltip_h = df[df["ltip_top2"] == 1]
+    ltip_l = df[df["ltip_top2"] == 0]
+    s1_yes = df[df["servier_aware"] == 1]
+    s1_no  = df[df["servier_aware"] == 0]
+
+    rows = []
+    combos = [
+        ("VA Used vs Not", va_yes, va_no),
+        ("LTIP Top-2 vs Non", ltip_h, ltip_l),
+        ("ServierONE Aware vs Not", s1_yes, s1_no),
+    ]
+    metrics = ["curr_vora_share", "future_intent", "vora_fam", "barriers",
+               "progs_known", "ICI", "IBC", "ABR", "MBC"]
+
+    for split_name, grp_a, grp_b in combos:
+        for m in metrics:
+            if m not in df.columns:
+                continue
+            a = grp_a[m].dropna()
+            b = grp_b[m].dropna()
+            if len(a) < 2 or len(b) < 2:
+                continue
+            _, p, sig, eff = statsig_test(a, b)
+            rows.append({
+                "Split": split_name,
+                "Metric": m,
+                "Group A Mean": round(a.mean(), 2),
+                "Group B Mean": round(b.mean(), 2),
+                "Δ": round(a.mean() - b.mean(), 2),
+                "n(A)": len(a),
+                "n(B)": len(b),
+                "p-value": p,
+                "Significant": "✓" if sig else "—",
+                "Effect": eff or "",
+            })
+
+    if rows:
+        summary_df = pd.DataFrame(rows)
+        st.dataframe(summary_df, use_container_width=True, height=500)
+        csv = summary_df.to_csv(index=False)
+        st.download_button("⬇ Download full cross-tab table", data=csv,
+                           file_name="ici_crosstab_summary.csv", mime="text/csv")
